@@ -85,8 +85,18 @@ static uint8_t keyprev[128];
 static int cd32_pause_prev;
 static int cd32_fps_prev;
 
+/* OutRun gearbox servo: the cart's gearbox is one C-button TOGGLE, but the
+ * pad should have explicit gears (L1 = low, R1 = high, like Power Drift).
+ * The game's live gear state is read from the HUD gear-glyph buffer in work
+ * RAM (0xFF6A93: 0x00 = L drawn, 0x77 = H drawn — found by RAM diffing), and
+ * a short C press is injected only when the actual gear differs from the
+ * requested one. */
+static int outrun_cart = -1;      /* -1 = not probed yet */
+static int gear_pulse;
+static int gear_cool;
+
 extern void md_audio_amiga_open(void);
-extern void md_audio_amiga_frame(void);
+extern void md_audio_amiga_frame(unsigned long eclk_now, unsigned long eclk_rate);
 extern void md_audio_amiga_close(void);
 extern void md_audio_amiga_pause(int paused);
 
@@ -496,12 +506,40 @@ static void poll_input(void)
     if (down) pad |= 0x02;
     if (left) pad |= 0x04;
     if (right) pad |= 0x08;
-    if (keydown[RK_LCTRL] || (cd32 & (CD32_YELLOW | CD32_GREEN | CD32_LSHOULDER)))
-        pad |= 0x10;                                             /* A */
-    if (keydown[RK_SPACE] || fire1 || (cd32 & CD32_RED))
-        pad |= 0x20;                                             /* B */
-    if (keydown[RK_LALT] || keydown[RK_RALT] || fire2 || (cd32 & (CD32_BLUE | CD32_RSHOULDER)))
-        pad |= 0x40;                                             /* C */
+    if (outrun_cart < 0)
+        outrun_cart = (memcmp((const char *)md_rom + 0x150, "OUTRUN", 6) == 0);
+    if (outrun_cart) {
+        /* OutRun default controls: A = brake, B = accelerate, C = gear toggle */
+        if (keydown[RK_LCTRL] || fire2 || (cd32 & (CD32_YELLOW | CD32_GREEN | CD32_BLUE)))
+            pad |= 0x10;                                         /* A brake */
+        if (keydown[RK_SPACE] || fire1 || (cd32 & CD32_RED))
+            pad |= 0x20;                                         /* B accelerate */
+        if (keydown[RK_LALT] || keydown[RK_RALT])
+            pad |= 0x40;                                         /* C gear toggle (kbd) */
+        {
+            int gear_high = (md_ram[0x6A93] == 0x77);
+            int want_high = (cd32 & CD32_RSHOULDER) != 0;
+            int want_low = (cd32 & CD32_LSHOULDER) != 0;
+            if (gear_cool)
+                gear_cool--;
+            if (gear_pulse) {
+                pad |= 0x40;
+                gear_pulse--;
+                if (!gear_pulse)
+                    gear_cool = 12;
+            } else if (!gear_cool &&
+                       ((want_high && !gear_high) || (want_low && gear_high))) {
+                gear_pulse = 2;
+            }
+        }
+    } else {
+        if (keydown[RK_LCTRL] || (cd32 & (CD32_YELLOW | CD32_GREEN | CD32_LSHOULDER)))
+            pad |= 0x10;                                         /* A */
+        if (keydown[RK_SPACE] || fire1 || (cd32 & CD32_RED))
+            pad |= 0x20;                                         /* B */
+        if (keydown[RK_LALT] || keydown[RK_RALT] || fire2 || (cd32 & (CD32_BLUE | CD32_RSHOULDER)))
+            pad |= 0x40;                                         /* C */
+    }
     if (keydown[RK_1] || (cd32 & CD32_PLAY))
         pad |= 0x80;                                             /* Start */
     if (frontend_frames < 960) {
@@ -548,8 +586,14 @@ int main(int argc, char **argv)
         if (quit_requested)
             break;
         if (!paused) {
+            unsigned long eclk_now = 0, eclk_r = 0;
             md_run_frame();
-            md_audio_amiga_frame();
+            if (TimerBase) {
+                struct EClockVal ev;
+                eclk_r = ReadEClock(&ev);
+                eclk_now = ev.ev_lo;
+            }
+            md_audio_amiga_frame(eclk_now, eclk_r);
             frontend_frames++;
             if (md_palette_dirty)
                 upload_palette();

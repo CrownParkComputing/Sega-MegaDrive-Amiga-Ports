@@ -19,7 +19,8 @@ BIN_DIR="${BIN_DIR:-$REPO_DIR/bin}"
 OUTPUT_NAME="${OUTPUT_NAME:-shinobi3_md}"
 
 MD_ACCURATE_OPN2="${MD_ACCURATE_OPN2:-0}"
-MD_FAST_FM="${MD_FAST_FM:-1}"
+MD_FAST_FM="${MD_FAST_FM:-0}"
+MD_GPGX_FM="${MD_GPGX_FM:-1}"
 MD_ENABLE_AUDIO="${MD_ENABLE_AUDIO:-1}"
 MD_RUN_Z80_SOUND="${MD_RUN_Z80_SOUND:-1}"
 
@@ -32,6 +33,7 @@ CFLAGS=(
   -m68040 -noixemul -O3 -fomit-frame-pointer -funroll-loops -DNDEBUG
   -DMD_ACCURATE_OPN2="$MD_ACCURATE_OPN2"
   -DMD_FAST_FM="$MD_FAST_FM"
+  -DMD_GPGX_FM="$MD_GPGX_FM"
   -DMD_ENABLE_AUDIO="$MD_ENABLE_AUDIO"
   -DMD_RUN_Z80_SOUND="$MD_RUN_Z80_SOUND"
   -I"$SRC_DIR"
@@ -48,12 +50,19 @@ echo "Compiling core components..."
 "$CC" "${CFLAGS[@]}" -c "$SRC_DIR/md_vdp.c" -o "$BUILD_DIR/md_vdp.o"
 "$CC" "${CFLAGS[@]}" -c "$SRC_DIR/md_audio_stub.c" -o "$BUILD_DIR/md_audio_stub.o"
 "$CC" "${CFLAGS[@]}" -c "$SRC_DIR/md_audio_amiga.c" -o "$BUILD_DIR/md_audio_amiga.o"
+EXTRA_OBJS=()
 if [ "$MD_ACCURATE_OPN2" = "1" ]; then
   "$CC" "${CFLAGS[@]}" -c "$CORES_DIR/nuked_opn2/ym3438.c" -o "$BUILD_DIR/ym3438.o"
-  EXTRA_OBJS=("$BUILD_DIR/ym3438.o")
+  EXTRA_OBJS+=("$BUILD_DIR/ym3438.o")
 else
   rm -f "$BUILD_DIR/ym3438.o"
-  EXTRA_OBJS=()
+fi
+if [ "$MD_GPGX_FM" = "1" ] && [ "$MD_ACCURATE_OPN2" != "1" ] && [ "$MD_FAST_FM" != "1" ]; then
+  # -O2/no-unroll: keep this hot block small — it is retranslated by UAE JIT
+  "$CC" "${CFLAGS[@]}" -O2 -fno-unroll-loops -c "$CORES_DIR/gpgx_ym2612/ym2612.c" -o "$BUILD_DIR/gpgx_ym2612.o"
+  EXTRA_OBJS+=("$BUILD_DIR/gpgx_ym2612.o")
+else
+  rm -f "$BUILD_DIR/gpgx_ym2612.o"
 fi
 "$CC" "${CFLAGS[@]}" -c "$SRC_DIR/rom_loader.c" -o "$BUILD_DIR/rom_loader.o"
 "$CC" "${CFLAGS[@]}" -c "$SRC_DIR/md_amiga.c" -o "$BUILD_DIR/md_amiga.o"

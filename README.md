@@ -27,8 +27,9 @@ shared/                         # Shared Mega Drive interpreter (all games)
 ├── rom_loader.c                # .bin/.gen/.smd cartridge loader
 ├── cores/
 │   ├── musashi/                # Musashi 68000 CPU emulator (vendored)
+│   ├── gpgx_ym2612/            # Genesis Plus GX YM2612 core (default FM)
 │   ├── nuked_opn2/             # Nuked-OPN2 YM3438/YM2612 (LGPL-2.1+)
-│   ├── ym/                     # Fast FM synthesis
+│   ├── ym/                     # Fast FM synthesis (deprecated)
 │   ├── z80.c                   # Z80 emulator
 │   └── md_m68k_interface.c     # Musashi memory callbacks
 ├── hal/
@@ -85,8 +86,9 @@ amiberry -f games/Revenge_of_Shinobi/dist/RevengeOfShinobi_MD.uae
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MD_ACCURATE_OPN2` | 0 | Use Nuked-OPN2 for accurate YM2612 (slow) |
-| `MD_FAST_FM` | 1 | Fast FM approximation |
+| `MD_GPGX_FM` | 1 | Genesis Plus GX YM2612 — hardware-accurate FM, generated at the chip's native 53267 Hz and box-averaged to the Paula rate |
+| `MD_ACCURATE_OPN2` | 0 | Use Nuked-OPN2 for reference-grade YM2612 (too slow for the Amiga build) |
+| `MD_FAST_FM` | 0 | Old fast FM approximation (deprecated) |
 | `MD_ENABLE_AUDIO` | 1 | Enable audio output |
 | `MD_RUN_Z80_SOUND` | 1 | Run Z80 sound CPU |
 | `OUTPUT_NAME` | shinobi3_md | Binary name |
@@ -98,6 +100,7 @@ amiberry -f games/Revenge_of_Shinobi/dist/RevengeOfShinobi_MD.uae
 - Sega Megadrive hardware manual
 - [Genesis Programming Guide](https://cgfm2.emuuniversity.com/)
 - [JGenesis](https://github.com/jsgroth/jgenesis) — VDP/audio behavior reference
+- [Genesis Plus GX](https://github.com/ekeeke/Genesis-Plus-GX) — YM2612 core (Eke-Eke's hardware-verified rewrite)
 - [Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2) — YM3438/YM2612 core
 - Musashi 68k CPU emulator
 
@@ -105,5 +108,6 @@ amiberry -f games/Revenge_of_Shinobi/dist/RevengeOfShinobi_MD.uae
 
 - Mega Drive interpreter code: MIT
 - Musashi 68000 core: see shared/cores/musashi/ for license
+- Genesis Plus GX YM2612: non-commercial license (see shared/cores/gpgx_ym2612/LICENSE.txt)
 - Nuked-OPN2: LGPL-2.1+ (see shared/cores/nuked_opn2/LICENSE)
 - ROM images are not included — you must supply your own legally obtained cartridges

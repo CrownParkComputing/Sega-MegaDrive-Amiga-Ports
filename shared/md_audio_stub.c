@@ -3,10 +3,14 @@
  *
  * PSG behavior follows JGenesis' SN76489 model: latch/data writes, /16 PSG
  * divider, 10-bit tone counters, 15-bit noise LFSR, and 2dB attenuation table.
- * Default output keeps the sound CPU and PSG running but does not mix the cheap
- * YM approximation; it was fast but too harsh for normal play. Define
- * MD_FAST_FM=1 for that approximation, or MD_ACCURATE_OPN2=1 to use Nuked-OPN2
- * clocked with JGenesis' Genesis YM divider of 42 master clocks per internal tick.
+ *
+ * FM: the default (MD_GPGX_FM) is Genesis Plus GX's ym2612.c — Eke-Eke's
+ * hardware-verified rewrite of the MAME core (Nemesis' real-YM2612 tests,
+ * Sauraen's die-shot analysis). It generates at the chip's native rate,
+ * master/1008 ≈ 53267 Hz, so envelope, LFO and timer A/B tempo are exact;
+ * output is box-averaged down to MD_SND_RATE. MD_ACCURATE_OPN2=1 swaps in
+ * Nuked-OPN2 (reference-grade, too slow for the Amiga build) and MD_FAST_FM=1
+ * keeps the old cheap triangle approximation; both disable MD_GPGX_FM.
  */
 
 #include "hal/md_machine.h"
@@ -18,6 +22,13 @@
 #ifndef MD_FAST_FM
 #define MD_FAST_FM 0
 #endif
+#ifndef MD_GPGX_FM
+#define MD_GPGX_FM 1
+#endif
+#if MD_ACCURATE_OPN2 || MD_FAST_FM
+#undef MD_GPGX_FM
+#define MD_GPGX_FM 0
+#endif
 #ifndef MD_RUN_Z80_SOUND
 #define MD_RUN_Z80_SOUND 1
 #endif
@@ -27,6 +38,12 @@
 
 #if MD_ACCURATE_OPN2
 #include "nuked_opn2/ym3438.h"
+#endif
+#if MD_GPGX_FM
+#include "gpgx_ym2612/ym2612.h"
+/* YM2612SaveContext writes sizeof(struct YM2612) + 48 bytes; md_host_probe
+ * prints the real size (~4.6KB on x86-64, smaller on m68k) — 8KB is ample. */
+#define MD_YM_CTX_MAX 8192
 #endif
 
 #include <string.h>
@@ -160,6 +177,9 @@ typedef struct {
     FastYmChannel fast[6];
     uint8_t dac_enabled;
     int16_t dac_sample;
+#if MD_GPGX_FM
+    uint8_t ym_ctx[MD_YM_CTX_MAX];
+#endif
 } AudioState;
 
 static const int16_t psg_volume[16] = {
@@ -365,9 +385,14 @@ static uint8_t ym_read_status(uint16_t a)
     if ((a & 3) && ym_status_decay)
         return ym_status_latch;
 
+#if MD_GPGX_FM
+    /* timer A/B flags come from the core's own native-rate timers */
+    status = (uint8_t)((YM2612Read() & 0x03) | (ym_busy ? 0x80 : 0x00));
+#else
     status = (uint8_t)((ym_busy ? 0x80 : 0x00) |
                        (ym_timer_b_flag ? 0x02 : 0x00) |
                        (ym_timer_a_flag ? 0x01 : 0x00));
+#endif
     ym_status_latch = status;
     ym_status_decay = 12000;
     return status;
@@ -435,6 +460,32 @@ static void ym_tick_status(void)
     }
 }
 
+#if MD_GPGX_FM
+/* Route the raw 0x4000-0x4003 write through the core, which keeps its own
+ * address latch (including the port-1 0x100 flag). ym_addr/ym_regs mirrors
+ * are maintained for the debug HUD only. Busy is ~25us on the real chip;
+ * one output-sample tick (~60us) is the closest this granularity gets. */
+static void ym_gpgx_write(uint16_t a, uint8_t v)
+{
+    int reg = a & 3;
+    YM2612Write((unsigned int)reg, v);
+    if (reg == 0) {
+        ym_addr[0] = v;
+    } else if (reg == 2) {
+        ym_addr[1] = v;
+    } else {
+        int port = (reg >> 1) & 1;
+        ym_regs[port][ym_addr[port]] = v;
+        ym_busy = 1;
+#if MD_AUDIO_DEBUG
+        ym_write_count++;
+        ym_last_reg = ym_addr[port];
+        ym_last_value = v;
+#endif
+    }
+}
+#endif
+
 static void ym_write(int port, uint8_t reg, uint8_t v)
 {
     int ch;
@@ -476,7 +527,32 @@ static void ym_write(int port, uint8_t reg, uint8_t v)
 
 static int16_t ym_sample(void)
 {
-#if MD_ACCURATE_OPN2
+#if MD_GPGX_FM
+    /* Generate at the chip's native rate (master/1008 = 53267 Hz NTSC) and
+     * box-average down to MD_SND_RATE — 3 or 4 native samples per output
+     * sample. Native-rate generation keeps pitch, envelopes and timer tempo
+     * exact (family lesson: never clock a chip core at the Paula rate). */
+    int fm_buf[2 * 6];
+    unsigned int n;
+
+    ym_cycle_acc += MD_MASTER_CLOCK;
+    n = ym_cycle_acc / (MD_SND_RATE * 1008u);
+    if (n) {
+        unsigned int i;
+        int acc = 0;
+        ym_cycle_acc -= n * (MD_SND_RATE * 1008u);
+        if (n > 6)
+            n = 6;
+        YM2612Update(fm_buf, (int)n);
+        for (i = 0; i < n; i++)
+            acc += fm_buf[2 * i] + fm_buf[2 * i + 1];
+        acc /= (int)(2 * n);
+        if (acc > 32767) acc = 32767;
+        if (acc < -32768) acc = -32768;
+        ym_last_sample = (int16_t)acc;
+    }
+    return ym_last_sample;
+#elif MD_ACCURATE_OPN2
     int clocks = 0;
     int sample_acc = 0;
     Bit16s pins[2];
@@ -527,6 +603,10 @@ static void run_z80_samples(int n)
 
 void md_audio_init(void)
 {
+#if MD_GPGX_FM
+    YM2612Init();
+    YM2612Config(YM2612_DISCRETE);   /* MD1's discrete chip, DAC ladder effect */
+#endif
 }
 
 void md_audio_reset(void)
@@ -553,6 +633,9 @@ void md_audio_reset(void)
 #if MD_ACCURATE_OPN2
     OPN2_SetChipType(ym3438_mode_ym2612);
     OPN2_Reset(&opn2);
+#endif
+#if MD_GPGX_FM
+    YM2612ResetChip();
 #endif
     psg_reset();
     z80_bus_held = 0;
@@ -630,6 +713,9 @@ void md_audio_state_save(void *out)
     memcpy(s->fast, fast_ym, sizeof s->fast);
     s->dac_enabled = fast_dac_enabled;
     s->dac_sample = fast_dac_sample;
+#if MD_GPGX_FM
+    YM2612SaveContext(s->ym_ctx);
+#endif
 }
 
 void md_audio_state_load(const void *in)
@@ -680,6 +766,9 @@ void md_audio_state_load(const void *in)
 #if MD_ACCURATE_OPN2
     OPN2_Reset(&opn2);
 #endif
+#if MD_GPGX_FM
+    YM2612LoadContext((unsigned char *)s->ym_ctx);
+#endif
 }
 
 void md_audio_render(signed char *out, int n)
@@ -688,14 +777,14 @@ void md_audio_render(signed char *out, int n)
     if (!out || n <= 0)
         return;
 
-#if !MD_ACCURATE_OPN2 && !MD_FAST_FM
+#if !MD_ACCURATE_OPN2 && !MD_FAST_FM && !MD_GPGX_FM
     run_z80_samples(n);
 #endif
 
     for (i = 0; i < n; i++) {
         int sample;
 
-#if MD_ACCURATE_OPN2 || MD_FAST_FM
+#if MD_ACCURATE_OPN2 || MD_FAST_FM || MD_GPGX_FM
         if (!z80_reset && !z80_bus_held) {
             int cycles;
             if (z80_irq_pending) {
@@ -765,6 +854,9 @@ void md_z80_area_write(uint16_t a, uint8_t v)
         return;
     }
     if (a >= 0x4000 && a <= 0x5FFF) {
+#if MD_GPGX_FM
+        ym_gpgx_write(a, v);
+#else
         int reg = a & 3;
         if (reg == 0)
             ym_addr[0] = v;
@@ -772,6 +864,7 @@ void md_z80_area_write(uint16_t a, uint8_t v)
             ym_addr[1] = v;
         else
             ym_write(reg >> 1, ym_addr[reg >> 1], v);
+#endif
         return;
     }
     if (a >= 0x6000 && a <= 0x60FF) {
@@ -802,6 +895,10 @@ void md_z80_set_reset(int asserted)
         memset(fast_ym, 0, sizeof fast_ym);
 #if MD_ACCURATE_OPN2
         OPN2_Reset(&opn2);
+#endif
+#if MD_GPGX_FM
+        /* the Z80 RESET line also resets the YM2612 on real hardware */
+        YM2612ResetChip();
 #endif
         ym_cycle_acc = 0;
         ym_last_sample = 0;

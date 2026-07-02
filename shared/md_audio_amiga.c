@@ -32,17 +32,21 @@
 #define R_AUD3LEN (0x0d4/2)
 #define R_AUD3VOL (0x0d8/2)
 
-#define MD_PAULA_PER (3546895 / MD_SND_RATE)
-#define MD_SPF       (MD_SND_RATE / 60 + 64)
-#define MD_LEAD_FR   3
-#define MD_RING_FR   24
-#define MD_LEAD      (MD_LEAD_FR * MD_SPF)
-#define MD_RING      (MD_RING_FR * MD_SPF)
+#define MD_PAULA_PER  (3546895 / MD_SND_RATE)
+#define MD_PAULA_RATE (3546895 / MD_PAULA_PER)   /* true consumption rate ~16574 Hz */
+#define MD_SPF        (MD_SND_RATE / 60 + 64)
+#define MD_LEAD_FR    6
+#define MD_RING_FR    24
+#define MD_LEAD       (MD_LEAD_FR * MD_SPF)
+#define MD_RING       (MD_RING_FR * MD_SPF)
 
 static signed char *ring;
 static unsigned long p_play;
 static unsigned long p_wrote;
 static int audio_paused;
+static unsigned long last_eclk;
+static unsigned long long eclk_acc;
+static int have_clk;
 
 static void aud_setup(volatile uint16_t *c)
 {
@@ -101,6 +105,8 @@ void md_audio_amiga_open(void)
 
     p_play = p_wrote = 0;
     audio_paused = 0;
+    have_clk = 0;
+    eclk_acc = 0;
     c[R_DMACON] = 0x000f;
     c[R_AUD0VOL] = 0;
     c[R_AUD1VOL] = 0;
@@ -112,13 +118,35 @@ void md_audio_amiga_open(void)
     c[R_DMACON] = 0x8203;
 }
 
-void md_audio_amiga_frame(void)
+/* Advance the play cursor by WALL CLOCK, not by displayed frames: Paula
+ * consumes at a fixed real rate, so frame-counted pacing garbles audio (stale
+ * ring loops) the moment the loop drops below 60 fps. eclk_rate==0 falls back
+ * to the old frame-counted advance. */
+void md_audio_amiga_frame(unsigned long eclk_now, unsigned long eclk_rate)
 {
-    unsigned long target, cap;
-    if (!ring || audio_paused)
+    unsigned long target, cap, delta, adv;
+    if (!ring || audio_paused) {
+        have_clk = 0;
         return;
+    }
 
-    p_play += MD_SND_RATE / 60;
+    if (eclk_rate) {
+        delta = have_clk ? (eclk_now - last_eclk) : eclk_rate / 60;
+        if (delta > eclk_rate / 4)      /* stall/debugger clamp: 0.25s max */
+            delta = eclk_rate / 60;
+        last_eclk = eclk_now;
+        have_clk = 1;
+        eclk_acc += (unsigned long long)delta * MD_PAULA_RATE;
+        adv = (unsigned long)(eclk_acc / eclk_rate);
+        eclk_acc %= eclk_rate;
+    } else {
+        adv = MD_SND_RATE / 60;
+    }
+    p_play += adv;
+
+    /* deep underrun: samples before p_play were already consumed — resync */
+    if ((long)(p_play - p_wrote) > 0)
+        p_wrote = p_play;
 
     target = p_play + MD_LEAD;
     cap = p_play + (MD_RING - MD_SPF);
@@ -126,7 +154,9 @@ void md_audio_amiga_frame(void)
         target = cap;
     if ((long)(target - p_wrote) > 0) {
         ring_render(target - p_wrote);
-        CacheClearU();
+        /* data-cache flush only: CacheClearU also clears the instruction
+         * cache, which forces UAE JIT to retranslate everything each frame */
+        CacheClearE(ring, MD_RING, CACRF_ClearD);
     }
 }
 
@@ -141,12 +171,12 @@ void md_audio_amiga_pause(int paused)
     if (!audio_paused) {
         p_wrote = p_play;
         ring_render(MD_LEAD);
-        CacheClearU();
+        CacheClearE(ring, MD_RING, CACRF_ClearD);
     }
 }
 #else
 void md_audio_amiga_close(void) { }
 void md_audio_amiga_open(void) { }
-void md_audio_amiga_frame(void) { }
+void md_audio_amiga_frame(unsigned long eclk_now, unsigned long eclk_rate) { (void)eclk_now; (void)eclk_rate; }
 void md_audio_amiga_pause(int paused) { (void)paused; }
 #endif

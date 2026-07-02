@@ -1,4 +1,4 @@
-# OutRun MD - Amiga RTG Port
+# Road Rash MD - Amiga RTG Port
 
 ## Building
 
@@ -13,19 +13,19 @@ This produces `bin/shinobi3_md` — the shared Mega Drive interpreter binary.
 ## Packaging
 
 ```bash
-cd games/OutRun
-./package.sh "/path/to/OutRun.zip"
+cd games/Road_Rash
+./package.sh "/path/to/Road Rash.zip"
 ```
 
 Outputs in `dist/`:
-- `OutRun_MD_Boot.hdf` — boot partition
-- `OutRun_MD.hdf` — game partition (interpreter + ROM)
-- `OutRun_MD.uae` — Amiberry config
+- `RoadRash_MD_Boot.hdf` — boot partition
+- `RoadRash_MD.hdf` — game partition (interpreter + ROM)
+- `RoadRash_MD.uae` — Amiberry config
 
 ## Running
 
 ```bash
-amiberry -f dist/OutRun_MD.uae
+amiberry -f dist/RoadRash_MD.uae
 ```
 
 ## Controls

@@ -1,4 +1,4 @@
-# OutRun MD - Amiga RTG Port
+# Sonic the Hedgehog MD - Amiga RTG Port
 
 ## Building
 
@@ -13,19 +13,19 @@ This produces `bin/shinobi3_md` — the shared Mega Drive interpreter binary.
 ## Packaging
 
 ```bash
-cd games/OutRun
-./package.sh "/path/to/OutRun.zip"
+cd games/Sonic_the_Hedgehog
+./package.sh "/path/to/Sonic the Hedgehog.zip"
 ```
 
 Outputs in `dist/`:
-- `OutRun_MD_Boot.hdf` — boot partition
-- `OutRun_MD.hdf` — game partition (interpreter + ROM)
-- `OutRun_MD.uae` — Amiberry config
+- `Sonic1_MD_Boot.hdf` — boot partition
+- `Sonic1_MD.hdf` — game partition (interpreter + ROM)
+- `Sonic1_MD.uae` — Amiberry config
 
 ## Running
 
 ```bash
-amiberry -f dist/OutRun_MD.uae
+amiberry -f dist/Sonic1_MD.uae
 ```
 
 ## Controls

@@ -8,9 +8,17 @@ m68k-amigaos-gcc, targeting A1200 AGA + Picasso96 RTG graphics.
 | Game | Folder |
 |------|--------|
 | Revenge of Shinobi | [games/Revenge_of_Shinobi](games/Revenge_of_Shinobi/) |
+| Road Rash | [games/Road_Rash](games/Road_Rash/) |
+| Road Rash 2 | [games/Road_Rash_2](games/Road_Rash_2/) |
+| Road Rash 3 | [games/Road_Rash_3](games/Road_Rash_3/) |
+| Sonic the Hedgehog | [games/Sonic_the_Hedgehog](games/Sonic_the_Hedgehog/) |
+| Sonic the Hedgehog 2 | [games/Sonic_the_Hedgehog_2](games/Sonic_the_Hedgehog_2/) |
+| Sonic 3 & Knuckles | [games/Sonic_3_and_Knuckles](games/Sonic_3_and_Knuckles/) |
 | OutRun | [games/OutRun](games/OutRun/) |
+| OutRun 2019 | [games/OutRun_2019](games/OutRun_2019/) |
+| OutRunners | [games/OutRunners](games/OutRunners/) |
 
-Both games share a single Mega Drive interpreter binary (`shinobi3_md`).
+All games share a single Mega Drive interpreter binary (`shinobi3_md`).
 Each game folder contains its own packaging script and Amiberry config.
 
 ## Repository Structure

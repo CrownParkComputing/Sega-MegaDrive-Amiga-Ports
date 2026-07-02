@@ -13,8 +13,9 @@
 set -euo pipefail
 export PATH="/home/jon/amiga-amigaos/bin:$HOME/.local/bin:$PATH"
 
-REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-GAME_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+GAME_DIR="${GAME_DIR:-$(pwd)}"
 DIST_DIR="$GAME_DIR/dist"
 BUILD_DIR="$GAME_DIR/build/package"
 

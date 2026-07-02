@@ -1,4 +1,4 @@
-# OutRun MD - Amiga RTG Port
+# OutRunners MD - Amiga RTG Port
 
 ## Building
 
@@ -13,19 +13,19 @@ This produces `bin/shinobi3_md` — the shared Mega Drive interpreter binary.
 ## Packaging
 
 ```bash
-cd games/OutRun
-./package.sh "/path/to/OutRun.zip"
+cd games/OutRunners
+./package.sh "/path/to/OutRunners.zip"
 ```
 
 Outputs in `dist/`:
-- `OutRun_MD_Boot.hdf` — boot partition
-- `OutRun_MD.hdf` — game partition (interpreter + ROM)
-- `OutRun_MD.uae` — Amiberry config
+- `OutRunners_MD_Boot.hdf` — boot partition
+- `OutRunners_MD.hdf` — game partition (interpreter + ROM)
+- `OutRunners_MD.uae` — Amiberry config
 
 ## Running
 
 ```bash
-amiberry -f dist/OutRun_MD.uae
+amiberry -f dist/OutRunners_MD.uae
 ```
 
 ## Controls

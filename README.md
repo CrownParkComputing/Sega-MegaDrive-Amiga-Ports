@@ -1,0 +1,109 @@
+# Sega Mega Drive - Amiga RTG Ports
+
+Native Amiga RTG interpreter for Sega Mega Drive cartridge ROMs. Built with
+m68k-amigaos-gcc, targeting A1200 AGA + Picasso96 RTG graphics.
+
+## Games
+
+| Game | Folder |
+|------|--------|
+| Revenge of Shinobi | [games/Revenge_of_Shinobi](games/Revenge_of_Shinobi/) |
+| OutRun | [games/OutRun](games/OutRun/) |
+
+Both games share a single Mega Drive interpreter binary (`shinobi3_md`).
+Each game folder contains its own packaging script and Amiberry config.
+
+## Repository Structure
+
+```
+shared/                         # Shared Mega Drive interpreter (all games)
+├── build_megadrive.sh          # Build script → bin/shinobi3_md
+├── package_rtg_hdf.sh          # Package binary + ROM → RTG boot HDFs
+├── md_amiga.c                  # Amiga RTG presenter and input loop
+├── md_machine.c                # 68k bus, I/O, interrupts, frame timing
+├── md_vdp.c                    # VDP ports, DMA, planes, sprites, palette
+├── md_audio_amiga.c            # Paula ring-buffer playback
+├── md_audio_stub.c             # Z80 sound bus, PSG, YM2612 FM
+├── rom_loader.c                # .bin/.gen/.smd cartridge loader
+├── cores/
+│   ├── musashi/                # Musashi 68000 CPU emulator (vendored)
+│   ├── nuked_opn2/             # Nuked-OPN2 YM3438/YM2612 (LGPL-2.1+)
+│   ├── ym/                     # Fast FM synthesis
+│   ├── z80.c                   # Z80 emulator
+│   └── md_m68k_interface.c     # Musashi memory callbacks
+├── hal/
+│   └── md_machine.h            # Mega Drive machine interface
+└── tools/
+    └── md_host_probe.c         # Host capability probe
+
+games/                          # Per-game configs and packaging
+├── Revenge_of_Shinobi/
+│   ├── package.sh              # Builds + packages this game
+│   ├── README.md
+│   └── dist/                   # Output HDFs + .uae (gitignored)
+└── OutRun/
+    ├── package.sh
+    ├── README.md
+    └── dist/
+
+bin/                            # Build output (gitignored)
+build/                          # Object files (gitignored)
+```
+
+## Building
+
+Prerequisites:
+- `m68k-amigaos-gcc` (amiga-amigaos toolchain)
+- `xdftool` (for packaging HDF images)
+
+```bash
+./shared/build_megadrive.sh
+```
+
+Output: `bin/shinobi3_md`
+
+## Packaging a Game
+
+```bash
+cd games/Revenge_of_Shinobi
+./package.sh "/path/to/ROM.zip"
+```
+
+Or specify the ROM and title explicitly via the shared script:
+
+```bash
+./shared/package_rtg_hdf.sh "/path/to/ROM.zip" "MyGame_MD"
+```
+
+## Running
+
+```bash
+amiberry -f games/Revenge_of_Shinobi/dist/RevengeOfShinobi_MD.uae
+```
+
+## Build Options
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MD_ACCURATE_OPN2` | 0 | Use Nuked-OPN2 for accurate YM2612 (slow) |
+| `MD_FAST_FM` | 1 | Fast FM approximation |
+| `MD_ENABLE_AUDIO` | 1 | Enable audio output |
+| `MD_RUN_Z80_SOUND` | 1 | Run Z80 sound CPU |
+| `OUTPUT_NAME` | shinobi3_md | Binary name |
+| `BUILD_DIR` | ./build | Object file directory |
+| `BIN_DIR` | ./bin | Output binary directory |
+
+## References
+
+- Sega Megadrive hardware manual
+- [Genesis Programming Guide](https://cgfm2.emuuniversity.com/)
+- [JGenesis](https://github.com/jsgroth/jgenesis) — VDP/audio behavior reference
+- [Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2) — YM3438/YM2612 core
+- Musashi 68k CPU emulator
+
+## License
+
+- Mega Drive interpreter code: MIT
+- Musashi 68000 core: see shared/cores/musashi/ for license
+- Nuked-OPN2: LGPL-2.1+ (see shared/cores/nuked_opn2/LICENSE)
+- ROM images are not included — you must supply your own legally obtained cartridges

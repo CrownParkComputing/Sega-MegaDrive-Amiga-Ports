@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+bin/
+**/dist/
+**/build/package/
+
+# Object files
+*.o
+
+# HDF disk images (large, contain ROMs)
+*.hdf
+
+# Amiberry config has absolute paths in dist only
+# (template configs in source are OK)
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Claude/AI agent working dirs
+.claude/
+.codex/
+.agents/

@@ -80,6 +80,68 @@ void md_vdp_state_load(const void *in)
     md_palette_dirty = 1;
 }
 
+/* ---- frame-global dynamic palette ----
+ * Raster games (OutRunners gradient skies, split-screen palette reloads)
+ * rewrite CRAM mid-frame — every scanline, even. A single 64-pen palette
+ * can't show that, so mid-frame CRAM deltas allocate NEW pens (up to 250)
+ * and the affected lines are remapped through a pen->slot LUT. Games that
+ * never touch CRAM mid-frame stay on pens 0-63 with zero extra work. */
+static int      cram_line_dirty;        /* CRAM write since last line */
+static uint16_t dyn_slot_val[250];      /* CRAM value per allocated slot */
+static int      dyn_nslots;
+static uint8_t  dyn_lut[64];            /* pen -> slot, for the current line */
+static uint16_t dyn_cur[64];            /* CRAM view dyn_lut reflects */
+static int      dyn_active;             /* any mid-frame delta this frame */
+
+static void dyn_line_update(int line)
+{
+    int i;
+    if (line == 0) {
+        /* The 64 base slots track CRAM at frame start; pool slots 64-249
+         * PERSIST across frames so a recurring raster value keeps the same
+         * pen — per-frame reshuffling made fading raster screens flash
+         * (pixels of frame N-1 shown against frame N's palette). The pool
+         * only flushes when it fills (one rough frame per screen change). */
+        if (dyn_nslots < 64 || dyn_nslots >= 250)
+            dyn_nslots = 64;
+        for (i = 0; i < 64; i++) {
+            dyn_slot_val[i] = md_cram[i];
+            dyn_cur[i] = md_cram[i];
+            dyn_lut[i] = (uint8_t)i;
+        }
+        dyn_active = 0;
+        cram_line_dirty = 0;
+        return;
+    }
+    if (!cram_line_dirty)
+        return;
+    cram_line_dirty = 0;
+    for (i = 0; i < 64; i++) {
+        uint16_t v = md_cram[i];
+        if (v != dyn_cur[i]) {
+            int s, slot = -1;
+            /* dedupe against POOL slots only: matching a base slot would tie
+             * the pen to a value that fades out from under it */
+            for (s = 64; s < dyn_nslots; s++) {
+                if (dyn_slot_val[s] == v) {
+                    slot = s;
+                    break;
+                }
+            }
+            if (slot < 0 && dyn_nslots < 250) {
+                slot = dyn_nslots++;
+                dyn_slot_val[slot] = v;
+                md_palette_dirty = 1;
+            }
+            if (slot >= 0) {
+                dyn_lut[i] = (uint8_t)slot;
+                dyn_active = 1;
+            }
+            dyn_cur[i] = v;
+        }
+    }
+}
+
 /* ---- raw memory write helpers ---- */
 
 static void vram_write_word(uint16_t a, uint16_t d)
@@ -98,6 +160,7 @@ static void data_write(uint16_t d)
         case 0x03:  /* CRAM */
             md_cram[(vdp_addr >> 1) & 63] = (uint16_t)(d & 0x0EEE);
             md_palette_dirty = 1;
+            cram_line_dirty = 1;
             break;
         case 0x05:  /* VSRAM */
             {
@@ -261,6 +324,27 @@ void md_vdp_palette(uint32_t out[64])
     }
 }
 
+/* full dynamic-slot palette (250 slots max; see dyn_line_update).
+ * Base entries 0-63 read LIVE CRAM, not the line-0 snapshot: games set new
+ * palettes during vblank, after the snapshot — resolving from the snapshot
+ * uploaded stale colours and, because the dirty flag was already consumed,
+ * the correct ones never arrived (permanently wrong colours after any
+ * single-shot palette change). Pool slots 64+ are the mid-frame values. */
+void md_vdp_palette_dyn(uint32_t out[256])
+{
+    int i;
+    for (i = 0; i < 250; i++) {
+        uint16_t c = (i < 64) ? md_cram[i]
+                   : (i < dyn_nslots) ? dyn_slot_val[i] : 0;
+        out[i] = ((uint32_t)md_dac[(c >> 1) & 7] << 16)
+               | ((uint32_t)md_dac[(c >> 5) & 7] << 8)
+               |  (uint32_t)md_dac[(c >> 9) & 7];
+    }
+    out[250] = 0x000000;
+    out[251] = 0xFFFFFF;
+    out[252] = out[253] = out[254] = out[255] = 0;
+}
+
 /* ---- renderer ---- */
 
 static uint16_t scroll_cells(uint8_t bits)
@@ -421,16 +505,32 @@ void md_vdp_render_line(int line, uint8_t *dst)
     uint8_t *out = dst + (h40 ? 0 : 32);
     int x;
 
+    dyn_line_update(line);
+
     if (!(md_vdp_reg[1] & 0x40)) {      /* display disabled */
-        memset(dst, bg, MD_SCREEN_W);
+        memset(dst, dyn_active ? dyn_lut[bg] : bg, MD_SCREEN_W);
         return;
     }
-    memset(dst, bg, MD_SCREEN_W);
+    memset(dst, dyn_active ? dyn_lut[bg] : bg, MD_SCREEN_W);
 
     render_plane(line, 1, W, bufB);
     render_plane(line, 0, W, bufA);
     memset(bufS, 0, (size_t)W);
     render_sprites(line, W, bufS);
+
+    if (dyn_active) {
+        for (x = 0; x < W; x++) {
+            uint8_t a = bufA[x], b = bufB[x], s = bufS[x], p = bg;
+            if ((b & 15) && !(b & 0x80)) p = b & 0x3F;
+            if ((a & 15) && !(a & 0x80)) p = a & 0x3F;
+            if ((s & 15) && !(s & 0x80)) p = s & 0x3F;
+            if ((b & 15) &&  (b & 0x80)) p = b & 0x3F;
+            if ((a & 15) &&  (a & 0x80)) p = a & 0x3F;
+            if ((s & 15) &&  (s & 0x80)) p = s & 0x3F;
+            out[x] = dyn_lut[p];
+        }
+        return;
+    }
 
     for (x = 0; x < W; x++) {
         uint8_t a = bufA[x], b = bufB[x], s = bufS[x], p = bg;

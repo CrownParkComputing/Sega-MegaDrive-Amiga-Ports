@@ -81,10 +81,40 @@ static uint8_t pad_read(int idx)
     return (uint8_t)((v & (uint8_t)~io_ctrl[idx]) | (io_data[idx] & io_ctrl[idx]));
 }
 
+/* Adapt the console's region byte to the cartridge so region-locked carts
+ * boot: J-only carts see a domestic machine, E-only carts a PAL export one,
+ * everything else the export-NTSC default. Handles both the letter-style
+ * ("JUE") and hex-bitmask-style (1=J 4=U 8=E) header region fields at 0x1F0.
+ * Machine timing stays NTSC/60 either way. */
+static uint8_t md_version_byte(void)
+{
+    int has_j = 0, has_u = 0, has_e = 0, i;
+    for (i = 0; i < 3; i++) {
+        char c = (char)md_rom[0x1F0 + i];
+        switch (c) {
+            case 'J': has_j = 1; break;
+            case 'U': case 'W': has_u = 1; break;
+            case 'E': has_e = 1; break;
+            case '1': has_j = 1; break;
+            case '4': case '5': has_u = 1; break;
+            case '8': has_e = 1; break;
+            case 'A': has_j = has_e = 1; break;
+            case 'C': case 'D': has_u = has_e = 1; break;
+            case 'F': has_j = has_u = has_e = 1; break;
+            default: break;
+        }
+    }
+    if (has_u || (!has_j && !has_e))
+        return 0xA0;                    /* export, NTSC */
+    if (has_e)
+        return 0xE0;                    /* export, PAL */
+    return 0x20;                        /* domestic, NTSC */
+}
+
 static uint8_t io_read(uint32_t a)      /* a = 0xA10000-0xA1001F, odd bytes */
 {
     switch (a & 0x1F) {
-        case 0x01: return 0xA0;         /* version: export, NTSC, no FDD, v0 */
+        case 0x01: return md_version_byte();
         case 0x03: return pad_read(0);
         case 0x05: return pad_read(1);
         case 0x07: return 0x7F;         /* exp port, no device */

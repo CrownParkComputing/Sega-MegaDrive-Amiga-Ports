@@ -10,13 +10,13 @@ static FILE *audio_file;
 static void write_ppm(const char *path)
 {
     FILE *f;
-    uint32_t pal[64];
+    uint32_t pal[256];
     int y, x;
 
     if (!path || !path[0])
         return;
 
-    md_vdp_palette(pal);
+    md_vdp_palette_dyn(pal);
     f = fopen(path, "wb");
     if (!f) {
         perror(path);
@@ -26,7 +26,7 @@ static void write_ppm(const char *path)
     fprintf(f, "P6\n%d %d\n255\n", MD_SCREEN_W, MD_SCREEN_H);
     for (y = 0; y < MD_SCREEN_H; y++) {
         for (x = 0; x < MD_SCREEN_W; x++) {
-            uint32_t rgb = pal[md_screen[y][x] & 63];
+            uint32_t rgb = pal[md_screen[y][x]];
             fputc((int)((rgb >> 16) & 0xFF), f);
             fputc((int)((rgb >> 8) & 0xFF), f);
             fputc((int)(rgb & 0xFF), f);

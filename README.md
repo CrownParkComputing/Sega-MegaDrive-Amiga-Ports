@@ -35,8 +35,9 @@ shared/                         # Shared Mega Drive interpreter (all games)
 ├── rom_loader.c                # .bin/.gen/.smd cartridge loader
 ├── cores/
 │   ├── musashi/                # Musashi 68000 CPU emulator (vendored)
-│   ├── gpgx_ym2612/            # Genesis Plus GX YM2612 core (default FM)
-│   ├── nuked_opn2/             # Nuked-OPN2 YM3438/YM2612 (LGPL-2.1+)
+│   ├── ymfm/                   # ymfm YM2612 core (BSD-3, default FM)
+│   ├── gpgx_ym2612/            # Genesis Plus GX YM2612 (non-commercial, dev A/B only)
+│   ├── nuked_opn2/             # Nuked-OPN2 YM3438/YM2612 (LGPL-2.1+, dev only)
 │   ├── ym/                     # Fast FM synthesis (deprecated)
 │   ├── z80.c                   # Z80 emulator
 │   └── md_m68k_interface.c     # Musashi memory callbacks
@@ -94,7 +95,8 @@ amiberry -f games/Revenge_of_Shinobi/dist/RevengeOfShinobi_MD.uae
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MD_GPGX_FM` | 1 | Genesis Plus GX YM2612 — hardware-accurate FM, generated at the chip's native 53267 Hz and box-averaged to the Paula rate |
+| `MD_YMFM_FM` | 1 | ymfm YM2612 (BSD-3-Clause) — hardware-accurate FM at the chip's native 53267 Hz, box-averaged to the Paula rate. License-clean for commercial builds |
+| `MD_GPGX_FM` | 0 | Genesis Plus GX YM2612 — accuracy A/B reference. NON-COMMERCIAL license: never ship in a sold build |
 | `MD_ACCURATE_OPN2` | 0 | Use Nuked-OPN2 for reference-grade YM2612 (too slow for the Amiga build) |
 | `MD_FAST_FM` | 0 | Old fast FM approximation (deprecated) |
 | `MD_ENABLE_AUDIO` | 1 | Enable audio output |
@@ -108,7 +110,8 @@ amiberry -f games/Revenge_of_Shinobi/dist/RevengeOfShinobi_MD.uae
 - Sega Megadrive hardware manual
 - [Genesis Programming Guide](https://cgfm2.emuuniversity.com/)
 - [JGenesis](https://github.com/jsgroth/jgenesis) — VDP/audio behavior reference
-- [Genesis Plus GX](https://github.com/ekeeke/Genesis-Plus-GX) — YM2612 core (Eke-Eke's hardware-verified rewrite)
+- [ymfm](https://github.com/aaronsgiles/ymfm) — YM2612 core (Aaron Giles, BSD-3-Clause; the shipping FM core)
+- [Genesis Plus GX](https://github.com/ekeeke/Genesis-Plus-GX) — YM2612 accuracy reference (Eke-Eke; non-commercial, dev builds only)
 - [Nuked-OPN2](https://github.com/nukeykt/Nuked-OPN2) — YM3438/YM2612 core
 - Musashi 68k CPU emulator
 

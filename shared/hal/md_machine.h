@@ -70,6 +70,8 @@ void     md_vdp_render_line(int line, uint8_t *dst);   /* dst = 320 pens */
 
 /* 9-bit BGR CRAM -> 0x00RRGGBB, 64 entries */
 void     md_vdp_palette(uint32_t out[64]);
+/* raster-aware dynamic-slot palette: 250 game slots + 250/251 = black/white */
+void     md_vdp_palette_dyn(uint32_t out[256]);
 
 /* ---- audio (md_audio.c) ---- */
 #define MD_SND_RATE 16574               /* Paula PAL period 214 */

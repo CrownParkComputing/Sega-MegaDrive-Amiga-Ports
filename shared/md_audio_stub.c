@@ -4,13 +4,15 @@
  * PSG behavior follows JGenesis' SN76489 model: latch/data writes, /16 PSG
  * divider, 10-bit tone counters, 15-bit noise LFSR, and 2dB attenuation table.
  *
- * FM: the default (MD_GPGX_FM) is Genesis Plus GX's ym2612.c — Eke-Eke's
- * hardware-verified rewrite of the MAME core (Nemesis' real-YM2612 tests,
- * Sauraen's die-shot analysis). It generates at the chip's native rate,
+ * FM: the default (MD_YMFM_FM) is Aaron Giles' ymfm YM2612 — BSD-3-Clause,
+ * license-clean for commercial packages, models the discrete chip's DAC
+ * ladder and drives its own timers. MD_GPGX_FM=1 swaps in Genesis Plus GX's
+ * ym2612.c (Eke-Eke's hardware-verified core — accuracy A/B reference only:
+ * its license forbids sale). Both generate at the chip's native rate,
  * master/1008 ≈ 53267 Hz, so envelope, LFO and timer A/B tempo are exact;
  * output is box-averaged down to MD_SND_RATE. MD_ACCURATE_OPN2=1 swaps in
  * Nuked-OPN2 (reference-grade, too slow for the Amiga build) and MD_FAST_FM=1
- * keeps the old cheap triangle approximation; both disable MD_GPGX_FM.
+ * keeps the old cheap triangle approximation.
  */
 
 #include "hal/md_machine.h"
@@ -23,12 +25,21 @@
 #define MD_FAST_FM 0
 #endif
 #ifndef MD_GPGX_FM
-#define MD_GPGX_FM 1
+#define MD_GPGX_FM 0
+#endif
+#ifndef MD_YMFM_FM
+#define MD_YMFM_FM 1
 #endif
 #if MD_ACCURATE_OPN2 || MD_FAST_FM
 #undef MD_GPGX_FM
 #define MD_GPGX_FM 0
 #endif
+#if MD_ACCURATE_OPN2 || MD_FAST_FM || MD_GPGX_FM
+#undef MD_YMFM_FM
+#define MD_YMFM_FM 0
+#endif
+/* one external native-rate FM core (ymfm or GPGX) is active */
+#define MD_FM_EXT (MD_GPGX_FM || MD_YMFM_FM)
 #ifndef MD_RUN_Z80_SOUND
 #define MD_RUN_Z80_SOUND 1
 #endif
@@ -44,6 +55,23 @@
 /* YM2612SaveContext writes sizeof(struct YM2612) + 48 bytes; md_host_probe
  * prints the real size (~4.6KB on x86-64, smaller on m68k) — 8KB is ample. */
 #define MD_YM_CTX_MAX 8192
+#define MDFM_INIT()      (YM2612Init(), YM2612Config(YM2612_DISCRETE))
+#define MDFM_RESET()     YM2612ResetChip()
+#define MDFM_WRITE(r, v) YM2612Write((unsigned int)(r), (unsigned int)(v))
+#define MDFM_STATUS()    YM2612Read()
+#define MDFM_UPDATE(b, n) YM2612Update((b), (int)(n))
+#endif
+#if MD_YMFM_FM
+void ymfm2612_init(void);
+void ymfm2612_reset(void);
+void ymfm2612_write(unsigned int reg, unsigned int val);
+unsigned int ymfm2612_status(void);
+void ymfm2612_generate(int *out, int n);
+#define MDFM_INIT()      ymfm2612_init()
+#define MDFM_RESET()     ymfm2612_reset()
+#define MDFM_WRITE(r, v) ymfm2612_write((unsigned int)(r), (unsigned int)(v))
+#define MDFM_STATUS()    ymfm2612_status()
+#define MDFM_UPDATE(b, n) ymfm2612_generate((b), (int)(n))
 #endif
 
 #include <string.h>
@@ -385,9 +413,9 @@ static uint8_t ym_read_status(uint16_t a)
     if ((a & 3) && ym_status_decay)
         return ym_status_latch;
 
-#if MD_GPGX_FM
+#if MD_FM_EXT
     /* timer A/B flags come from the core's own native-rate timers */
-    status = (uint8_t)((YM2612Read() & 0x03) | (ym_busy ? 0x80 : 0x00));
+    status = (uint8_t)((MDFM_STATUS() & 0x03) | (ym_busy ? 0x80 : 0x00));
 #else
     status = (uint8_t)((ym_busy ? 0x80 : 0x00) |
                        (ym_timer_b_flag ? 0x02 : 0x00) |
@@ -460,15 +488,16 @@ static void ym_tick_status(void)
     }
 }
 
-#if MD_GPGX_FM
+#if MD_FM_EXT
 /* Route the raw 0x4000-0x4003 write through the core, which keeps its own
  * address latch (including the port-1 0x100 flag). ym_addr/ym_regs mirrors
- * are maintained for the debug HUD only. Busy is ~25us on the real chip;
- * one output-sample tick (~60us) is the closest this granularity gets. */
-static void ym_gpgx_write(uint16_t a, uint8_t v)
+ * are maintained for the debug HUD and for save-state register replay.
+ * Busy is ~25us on the real chip; one output-sample tick (~60us) is the
+ * closest this granularity gets. */
+static void ym_ext_write(uint16_t a, uint8_t v)
 {
     int reg = a & 3;
-    YM2612Write((unsigned int)reg, v);
+    MDFM_WRITE(reg, v);
     if (reg == 0) {
         ym_addr[0] = v;
     } else if (reg == 2) {
@@ -527,7 +556,7 @@ static void ym_write(int port, uint8_t reg, uint8_t v)
 
 static int16_t ym_sample(void)
 {
-#if MD_GPGX_FM
+#if MD_FM_EXT
     /* Generate at the chip's native rate (master/1008 = 53267 Hz NTSC) and
      * box-average down to MD_SND_RATE — 3 or 4 native samples per output
      * sample. Native-rate generation keeps pitch, envelopes and timer tempo
@@ -543,7 +572,7 @@ static int16_t ym_sample(void)
         ym_cycle_acc -= n * (MD_SND_RATE * 1008u);
         if (n > 6)
             n = 6;
-        YM2612Update(fm_buf, (int)n);
+        MDFM_UPDATE(fm_buf, n);
         for (i = 0; i < n; i++)
             acc += fm_buf[2 * i] + fm_buf[2 * i + 1];
         acc /= (int)(2 * n);
@@ -603,9 +632,8 @@ static void run_z80_samples(int n)
 
 void md_audio_init(void)
 {
-#if MD_GPGX_FM
-    YM2612Init();
-    YM2612Config(YM2612_DISCRETE);   /* MD1's discrete chip, DAC ladder effect */
+#if MD_FM_EXT
+    MDFM_INIT();                     /* MD1's discrete chip, DAC ladder effect */
 #endif
 }
 
@@ -634,8 +662,8 @@ void md_audio_reset(void)
     OPN2_SetChipType(ym3438_mode_ym2612);
     OPN2_Reset(&opn2);
 #endif
-#if MD_GPGX_FM
-    YM2612ResetChip();
+#if MD_FM_EXT
+    MDFM_RESET();
 #endif
     psg_reset();
     z80_bus_held = 0;
@@ -663,6 +691,48 @@ void md_audio_reset(void)
     fast_dac_enabled = 0;
     fast_dac_sample = 0;
 }
+
+#if MD_YMFM_FM
+/* Rebuild the ymfm chip from the ym_regs mirror after a state load: reset,
+ * then replay mode/patch registers in a safe order (block/fnum-high before
+ * fnum-low so the frequency latch lands right; DAC enable before DAC data;
+ * key-on register 0x28 skipped — the driver retriggers notes itself). */
+static void mdfm_write_reg(int port, uint8_t reg, uint8_t v)
+{
+    MDFM_WRITE(port ? 2 : 0, reg);
+    MDFM_WRITE(port ? 3 : 1, v);
+}
+
+static void mdfm_replay_regs(void)
+{
+    static const uint8_t mode_regs[] = { 0x22, 0x24, 0x25, 0x26, 0x27, 0x2B, 0x2A };
+    int port;
+    unsigned i;
+
+    MDFM_RESET();
+    for (i = 0; i < sizeof mode_regs; i++)
+        mdfm_write_reg(0, mode_regs[i], ym_regs[0][mode_regs[i]]);
+    for (port = 0; port < 2; port++) {
+        unsigned r;
+        for (r = 0x30; r <= 0x9F; r++)
+            mdfm_write_reg(port, (uint8_t)r, ym_regs[port][r]);
+        if (port == 0) {            /* ch3-special block/fnum, high before low */
+            for (r = 0xAC; r <= 0xAE; r++)
+                mdfm_write_reg(0, (uint8_t)r, ym_regs[0][r]);
+            for (r = 0xA8; r <= 0xAA; r++)
+                mdfm_write_reg(0, (uint8_t)r, ym_regs[0][r]);
+        }
+        for (r = 0xA4; r <= 0xA6; r++)
+            mdfm_write_reg(port, (uint8_t)r, ym_regs[port][r]);
+        for (r = 0xA0; r <= 0xA2; r++)
+            mdfm_write_reg(port, (uint8_t)r, ym_regs[port][r]);
+        for (r = 0xB0; r <= 0xB6; r++)
+            mdfm_write_reg(port, (uint8_t)r, ym_regs[port][r]);
+    }
+    /* leave the address latch where the game had it */
+    MDFM_WRITE(0, ym_addr[0]);
+}
+#endif
 
 unsigned md_audio_state_size(void)
 {
@@ -769,6 +839,9 @@ void md_audio_state_load(const void *in)
 #if MD_GPGX_FM
     YM2612LoadContext((unsigned char *)s->ym_ctx);
 #endif
+#if MD_YMFM_FM
+    mdfm_replay_regs();
+#endif
 }
 
 void md_audio_render(signed char *out, int n)
@@ -777,14 +850,14 @@ void md_audio_render(signed char *out, int n)
     if (!out || n <= 0)
         return;
 
-#if !MD_ACCURATE_OPN2 && !MD_FAST_FM && !MD_GPGX_FM
+#if !MD_ACCURATE_OPN2 && !MD_FAST_FM && !MD_FM_EXT
     run_z80_samples(n);
 #endif
 
     for (i = 0; i < n; i++) {
         int sample;
 
-#if MD_ACCURATE_OPN2 || MD_FAST_FM || MD_GPGX_FM
+#if MD_ACCURATE_OPN2 || MD_FAST_FM || MD_FM_EXT
         if (!z80_reset && !z80_bus_held) {
             int cycles;
             if (z80_irq_pending) {
@@ -854,8 +927,8 @@ void md_z80_area_write(uint16_t a, uint8_t v)
         return;
     }
     if (a >= 0x4000 && a <= 0x5FFF) {
-#if MD_GPGX_FM
-        ym_gpgx_write(a, v);
+#if MD_FM_EXT
+        ym_ext_write(a, v);
 #else
         int reg = a & 3;
         if (reg == 0)
@@ -896,9 +969,9 @@ void md_z80_set_reset(int asserted)
 #if MD_ACCURATE_OPN2
         OPN2_Reset(&opn2);
 #endif
-#if MD_GPGX_FM
+#if MD_FM_EXT
         /* the Z80 RESET line also resets the YM2612 on real hardware */
-        YM2612ResetChip();
+        MDFM_RESET();
 #endif
         ym_cycle_acc = 0;
         ym_last_sample = 0;

@@ -103,6 +103,10 @@ EndCLI >NIL:
 EOF
 
 cp -f "$BOOT_TEMPLATE" "$BOOT_HDF"
+# no-RTG safety: the PicassoIV monitor driver throws a boot-blocking
+# "reset the Workbench screen" requester when no RTG card is present
+xdftool "$BOOT_HDF" delete DEVS/Monitors/PicassoIV >/dev/null 2>&1 || true
+xdftool "$BOOT_HDF" delete DEVS/Monitors/PicassoIV.info >/dev/null 2>&1 || true
 xdftool "$BOOT_HDF" delete S/startup-sequence + write "$STARTUP" S/startup-sequence
 
 rm -f "$GAME_HDF"

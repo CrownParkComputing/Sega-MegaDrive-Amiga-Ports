@@ -76,6 +76,13 @@ static ULONG eclock_rate, frame_ticks, next_tick;
 static ULONG fps_last_tick;
 static int disp_x, disp_y, disp_w, disp_h;
 static int colmap[RTG_W], rowmap[RTG_H];
+
+/* AGA path: when the opened screen is planar (no RTG board), present via a
+ * hand c2p into double screen buffers instead of WriteChunkyPixels (whose
+ * OS planar conversion is unusably slow). */
+static int screen_planar;
+static struct ScreenBuffer *sbuf[2];
+static int sb_back;
 static unsigned fps_frames, fps_value;
 static unsigned frontend_frames;
 static int quit_requested;
@@ -85,15 +92,13 @@ static uint8_t keyprev[128];
 static int cd32_pause_prev;
 static int cd32_fps_prev;
 
-/* OutRun gearbox servo: the cart's gearbox is one C-button TOGGLE, but the
- * pad should have explicit gears (L1 = low, R1 = high, like Power Drift).
- * The game's live gear state is read from the HUD gear-glyph buffer in work
- * RAM (0xFF6A93: 0x00 = L drawn, 0x77 = H drawn — found by RAM diffing), and
- * a short C press is injected only when the actual gear differs from the
- * requested one. */
+/* OutRun cart detection for its dedicated control layout (see poll_input). */
 static int outrun_cart = -1;      /* -1 = not probed yet */
-static int gear_pulse;
-static int gear_cool;
+
+/* Per-game save-state file (argv[2]); the loader passes one per cart and the
+ * state is auto-saved when the player exits back to the loader. */
+static const char *state_path = "DH1:md_state.bin";
+static int state_path_explicit;
 
 extern void md_audio_amiga_open(void);
 extern void md_audio_amiga_frame(unsigned long eclk_now, unsigned long eclk_rate);
@@ -162,6 +167,11 @@ static int frame_pace(void)
 static void shutdown_rtg(void)
 {
     close_timer();
+    if (scr) {
+        if (sbuf[0]) { FreeScreenBuffer(scr, sbuf[0]); sbuf[0] = 0; }
+        if (sbuf[1]) { FreeScreenBuffer(scr, sbuf[1]); sbuf[1] = 0; }
+    }
+    screen_planar = 0;
     if (win) {
         CloseWindow(win);
         win = 0;
@@ -244,6 +254,39 @@ static int open_rtg(void)
     if (!rtg_frame)
         return 0;
 
+    /* planar screen (no RTG board): BestModeID happily returns an AGA mode,
+     * so detect by the bitmap itself, not by mode availability. Do NOT trust
+     * BMF_STANDARD alone — some RTG drivers set it on chunky bitmaps, and
+     * c2p output into a chunky screen is garbage. A real planar bitmap has
+     * a row pitch of width/8 bytes and its planes live in chip RAM. */
+    {
+        struct BitMap *bm = scr->RastPort.BitMap;
+        screen_planar =
+            (GetBitMapAttr(bm, BMA_FLAGS) & BMF_STANDARD) != 0 &&
+            bm->BytesPerRow == (RTG_W / 8) &&
+            bm->Depth == 8 &&
+            bm->Planes[0] != 0 &&
+            (TypeOfMem(bm->Planes[0]) & MEMF_CHIP) != 0;
+    }
+    if (screen_planar) {
+        sbuf[0] = AllocScreenBuffer(scr, NULL, SB_SCREEN_BITMAP);
+        sbuf[1] = AllocScreenBuffer(scr, NULL, 0);
+        if (sbuf[0] && sbuf[1]) {
+            int b, p;
+            for (b = 0; b < 2; b++) {
+                struct BitMap *bm = sbuf[b]->sb_BitMap;
+                for (p = 0; p < bm->Depth; p++)
+                    memset(bm->Planes[p], 0, (size_t)bm->BytesPerRow * bm->Rows);
+            }
+            sb_back = 1;
+        } else {
+            /* keep running via WriteChunkyPixels (slow but correct) */
+            if (sbuf[0]) { FreeScreenBuffer(scr, sbuf[0]); sbuf[0] = 0; }
+            if (sbuf[1]) { FreeScreenBuffer(scr, sbuf[1]); sbuf[1] = 0; }
+            screen_planar = 0;
+        }
+    }
+
     win = OpenWindowTags(0, WA_CustomScreen, (ULONG)scr, WA_Left, 0, WA_Top, 0,
                          WA_Width, RTG_W, WA_Height, RTG_H, WA_Backdrop, TRUE,
                          WA_Borderless, TRUE, WA_Activate, TRUE, WA_RMBTrap, TRUE,
@@ -262,18 +305,25 @@ static int open_rtg(void)
 
 static void upload_palette(void)
 {
-    uint32_t pal[64];
+    uint32_t pal[256];
     int i;
     const int entries = 252;
+    static uint32_t pal_csum_prev = 0xFFFFFFFFu;
+    uint32_t csum = 0;
 
-    md_vdp_palette(pal);
+    md_vdp_palette_dyn(pal);
+    /* raster games dirty the flag EVERY frame; only pay for LoadRGB32 when
+     * the resolved palette content really changed (slot pool is persistent,
+     * so a stable raster screen settles after one frame) */
+    for (i = 0; i < entries; i++)
+        csum = (csum * 33u) ^ pal[i];
+    md_palette_dirty = 0;
+    if (csum == pal_csum_prev)
+        return;
+    pal_csum_prev = csum;
     loadrgb[0] = ((uint32_t)entries << 16) | 0;
     for (i = 0; i < entries; i++) {
-        uint32_t rgb = (i < 64) ? pal[i] : 0;
-        if (i == 250)
-            rgb = 0x000000;
-        else if (i == 251)
-            rgb = 0xFFFFFF;
+        uint32_t rgb = pal[i];
         loadrgb[1 + i * 3 + 0] = ((rgb >> 16) & 0xFF) * 0x01010101u;
         loadrgb[1 + i * 3 + 1] = ((rgb >> 8) & 0xFF) * 0x01010101u;
         loadrgb[1 + i * 3 + 2] = (rgb & 0xFF) * 0x01010101u;
@@ -395,12 +445,61 @@ static void scale_frame(void)
     }
 }
 
+/* unrolled 8-plane chunky->planar, word writes, 16px groups; dx 16-aligned
+ * (game rects are: 0 for H40, 32 for H32) — Black Tiger/1943 AGA pattern */
+static void c2p_region(struct BitMap *bm, const uint8_t *src, int stride,
+                       int dx, int dy, int w, int h)
+{
+    int bpr = bm->BytesPerRow;
+    uint8_t *p0 = bm->Planes[0], *p1 = bm->Planes[1], *p2 = bm->Planes[2], *p3 = bm->Planes[3];
+    uint8_t *p4 = bm->Planes[4], *p5 = bm->Planes[5], *p6 = bm->Planes[6], *p7 = bm->Planes[7];
+    int x, y, k;
+    for (y = 0; y < h; y++) {
+        const uint8_t *s = src + (size_t)y * stride;
+        int row = (dy + y) * bpr + (dx >> 3);
+        for (x = 0; x < w; x += 16) {
+            const uint8_t *q = s + x;
+            uint16_t w0 = 0, w1 = 0, w2 = 0, w3 = 0, w4 = 0, w5 = 0, w6 = 0, w7 = 0;
+            for (k = 0; k < 16; k++) {
+                unsigned v = q[k];
+                uint16_t bit = (uint16_t)(0x8000u >> k);
+                if (v & 0x01) w0 |= bit;
+                if (v & 0x02) w1 |= bit;
+                if (v & 0x04) w2 |= bit;
+                if (v & 0x08) w3 |= bit;
+                if (v & 0x10) w4 |= bit;
+                if (v & 0x20) w5 |= bit;
+                if (v & 0x40) w6 |= bit;
+                if (v & 0x80) w7 |= bit;
+            }
+            *(uint16_t *)(p0 + row) = w0; *(uint16_t *)(p1 + row) = w1;
+            *(uint16_t *)(p2 + row) = w2; *(uint16_t *)(p3 + row) = w3;
+            *(uint16_t *)(p4 + row) = w4; *(uint16_t *)(p5 + row) = w5;
+            *(uint16_t *)(p6 + row) = w6; *(uint16_t *)(p7 + row) = w7;
+            row += 2;
+        }
+    }
+}
+
 static void present_frame(void)
 {
     scale_frame();
     update_fps_counter();
     if (show_fps)
         draw_fps_overlay();
+    if (screen_planar && sbuf[0] && sbuf[1]) {
+        int x0 = disp_x & ~15;
+        int w16 = (disp_x + disp_w + 15 - x0) & ~15;
+        if (x0 + w16 > RTG_W)
+            w16 = RTG_W - x0;
+        c2p_region(sbuf[sb_back]->sb_BitMap,
+                   rtg_frame + (size_t)disp_y * RTG_W + x0, RTG_W,
+                   x0, disp_y, w16, disp_h);
+        while (!ChangeScreenBuffer(scr, sbuf[sb_back]))
+            ;
+        sb_back ^= 1;
+        return;
+    }
     WriteChunkyPixels(win->RPort, disp_x, disp_y, disp_x + disp_w - 1, disp_y + disp_h - 1,
                       rtg_frame + (size_t)disp_y * RTG_W + disp_x, RTG_W);
 }
@@ -471,15 +570,15 @@ static void poll_input(void)
         fflush(stdout);
     }
     if (keydown[RK_F5] && !keyprev[RK_F5]) {
-        state_ok = md_save_state("DH1:md_state.bin");
-        if (!state_ok)
+        state_ok = md_save_state(state_path);
+        if (!state_ok && !state_path_explicit)
             state_ok = md_save_state("md_state.bin");
         printf(state_ok ? "state saved\n" : "state save failed\n");
         fflush(stdout);
     }
     if (keydown[RK_F6] && !keyprev[RK_F6]) {
-        state_ok = md_load_state("DH1:md_state.bin");
-        if (!state_ok)
+        state_ok = md_load_state(state_path);
+        if (!state_ok && !state_path_explicit)
             state_ok = md_load_state("md_state.bin");
         if (state_ok && md_palette_dirty)
             upload_palette();
@@ -506,32 +605,27 @@ static void poll_input(void)
     if (down) pad |= 0x02;
     if (left) pad |= 0x04;
     if (right) pad |= 0x08;
-    if (outrun_cart < 0)
-        outrun_cart = (memcmp((const char *)md_rom + 0x150, "OUTRUN", 6) == 0);
+    if (outrun_cart < 0) {
+        /* region-independent: match the product serial first (all regional
+         * OutRun dumps share GM 00004052), then the space-padded name in
+         * either header slot. OUTRUN 2019 / OUTRUNNERS have other serials. */
+        outrun_cart =
+            (memcmp((const char *)md_rom + 0x180, "GM 00004052", 11) == 0) ||
+            (memcmp((const char *)md_rom + 0x150, "OUTRUN          ", 16) == 0) ||
+            (memcmp((const char *)md_rom + 0x120, "OUTRUN          ", 16) == 0);
+    }
     if (outrun_cart) {
-        /* OutRun default controls: A = brake, B = accelerate, C = gear toggle */
-        if (keydown[RK_LCTRL] || fire2 || (cd32 & (CD32_YELLOW | CD32_GREEN | CD32_BLUE)))
-            pad |= 0x10;                                         /* A brake */
+        /* This cart's default control type (verified on its Options screen
+         * and by probing): pad UP = low gear, pad DOWN = high gear,
+         * A (and C) = accelerate, B = brake. */
         if (keydown[RK_SPACE] || fire1 || (cd32 & CD32_RED))
-            pad |= 0x20;                                         /* B accelerate */
-        if (keydown[RK_LALT] || keydown[RK_RALT])
-            pad |= 0x40;                                         /* C gear toggle (kbd) */
-        {
-            int gear_high = (md_ram[0x6A93] == 0x77);
-            int want_high = (cd32 & CD32_RSHOULDER) != 0;
-            int want_low = (cd32 & CD32_LSHOULDER) != 0;
-            if (gear_cool)
-                gear_cool--;
-            if (gear_pulse) {
-                pad |= 0x40;
-                gear_pulse--;
-                if (!gear_pulse)
-                    gear_cool = 12;
-            } else if (!gear_cool &&
-                       ((want_high && !gear_high) || (want_low && gear_high))) {
-                gear_pulse = 2;
-            }
-        }
+            pad |= 0x10;                                         /* A accelerate */
+        if (keydown[RK_LCTRL] || fire2 || (cd32 & (CD32_YELLOW | CD32_GREEN | CD32_BLUE)))
+            pad |= 0x20;                                         /* B brake */
+        if (cd32 & CD32_LSHOULDER)
+            pad |= 0x01;                                         /* L1 = up = LOW */
+        if (cd32 & CD32_RSHOULDER)
+            pad |= 0x02;                                         /* R1 = down = HIGH */
     } else {
         if (keydown[RK_LCTRL] || (cd32 & (CD32_YELLOW | CD32_GREEN | CD32_LSHOULDER)))
             pad |= 0x10;                                         /* A */
@@ -563,12 +657,19 @@ static void poll_input(void)
 int main(int argc, char **argv)
 {
     const char *rom_path;
+    int resume = 0;
 
     if (argc < 2) {
-        printf("usage: shinobi3_md <Shinobi III .bin/.gen/.smd>\n");
+        printf("usage: shinobi3_md <cart .bin/.gen/.smd> [statefile] [RESUME]\n");
         return 20;
     }
     rom_path = argv[1];
+    if (argc > 2 && argv[2][0]) {
+        state_path = argv[2];
+        state_path_explicit = 1;
+    }
+    if (argc > 3 && strcmp(argv[3], "RESUME") == 0)
+        resume = 1;
     if (!md_load_rom(rom_path))
         return 20;
 
@@ -579,30 +680,48 @@ int main(int argc, char **argv)
         return 20;
     }
     upload_palette();
+    if (resume) {
+        if (md_load_state(state_path))
+            upload_palette();
+    }
     md_audio_amiga_open();
 
-    while (!quit_requested) {
-        poll_input();
-        if (quit_requested)
-            break;
-        if (!paused) {
-            unsigned long eclk_now = 0, eclk_r = 0;
-            md_run_frame();
-            if (TimerBase) {
-                struct EClockVal ev;
-                eclk_r = ReadEClock(&ev);
-                eclk_now = ev.ev_lo;
+    {
+        int behind = 0, skipped_last = 0;
+        while (!quit_requested) {
+            poll_input();
+            if (quit_requested)
+                break;
+            if (!paused) {
+                unsigned long eclk_now = 0, eclk_r = 0;
+                md_run_frame();
+                if (TimerBase) {
+                    struct EClockVal ev;
+                    eclk_r = ReadEClock(&ev);
+                    eclk_now = ev.ev_lo;
+                }
+                md_audio_amiga_frame(eclk_now, eclk_r);
+                frontend_frames++;
+                if (md_palette_dirty)
+                    upload_palette();
             }
-            md_audio_amiga_frame(eclk_now, eclk_r);
-            frontend_frames++;
-            if (md_palette_dirty)
-                upload_palette();
+            /* when the loop can't hold 60Hz, shed the video present (never
+             * the audio) — at most every other frame so video >= 30fps */
+            if (behind && !skipped_last && !paused) {
+                skipped_last = 1;
+            } else {
+                present_frame();
+                skipped_last = 0;
+            }
+            behind = frame_pace();
         }
-        present_frame();
-        frame_pace();
     }
 
     md_audio_amiga_close();
+    /* loader flow: exiting back to the menu always snapshots the game so the
+     * loader can offer "resume" next time */
+    if (state_path_explicit)
+        md_save_state(state_path);
     shutdown_rtg();
     return 0;
 }

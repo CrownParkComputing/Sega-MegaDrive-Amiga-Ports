@@ -9,6 +9,7 @@
 #include <exec/memory.h>
 #include <proto/exec.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "hal/md_machine.h"
 
@@ -35,7 +36,7 @@
 #define MD_PAULA_PER  (3546895 / MD_SND_RATE)
 #define MD_PAULA_RATE (3546895 / MD_PAULA_PER)   /* true consumption rate ~16574 Hz */
 #define MD_SPF        (MD_SND_RATE / 60 + 64)
-#define MD_LEAD_FR    6
+#define MD_LEAD_FR    8
 #define MD_RING_FR    24
 #define MD_LEAD       (MD_LEAD_FR * MD_SPF)
 #define MD_RING       (MD_RING_FR * MD_SPF)
@@ -144,20 +145,37 @@ void md_audio_amiga_frame(unsigned long eclk_now, unsigned long eclk_rate)
     }
     p_play += adv;
 
-    /* deep underrun: samples before p_play were already consumed — resync */
-    if ((long)(p_play - p_wrote) > 0)
+    /* deep underrun: samples before p_play were already consumed. Silence the
+     * ring before resyncing — otherwise Paula audibly replays last lap's
+     * stale content ("looping music") until fresh data lands. */
+    if ((long)(p_play - p_wrote) > 0) {
+        memset(ring, 0, MD_RING);
         p_wrote = p_play;
+    }
 
     target = p_play + MD_LEAD;
     cap = p_play + (MD_RING - MD_SPF);
     if (target > cap)
         target = cap;
-    if ((long)(target - p_wrote) > 0) {
+    if ((long)(target - p_wrote) > 0)
         ring_render(target - p_wrote);
-        /* data-cache flush only: CacheClearU also clears the instruction
-         * cache, which forces UAE JIT to retranslate everything each frame */
-        CacheClearE(ring, MD_RING, CACRF_ClearD);
+
+    /* silence the band just ahead of the write head: when a long frame lets
+     * Paula graze past it, the transient plays as a clean micro-dropout
+     * instead of 24-frame-old ring content (audible as "reverb" on speech) */
+    {
+        unsigned long gpos = p_wrote % MD_RING;
+        unsigned long glen = MD_SPF;
+        if (gpos + glen <= MD_RING) {
+            memset(ring + gpos, 0, glen);
+        } else {
+            memset(ring + gpos, 0, MD_RING - gpos);
+            memset(ring, 0, glen - (MD_RING - gpos));
+        }
     }
+    /* data-cache flush only: CacheClearU also clears the instruction
+     * cache, which forces UAE JIT to retranslate everything each frame */
+    CacheClearE(ring, MD_RING, CACRF_ClearD);
 }
 
 void md_audio_amiga_pause(int paused)
